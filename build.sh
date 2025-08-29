@@ -1,13 +1,8 @@
-#!/usr/bin/env bash
-set -e
-
+# Установка uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
-source $HOME/.local/bin/env
 
-uv sync
-psql -a -d $DATABASE_URL -f database.sql
-# #!/usr/bin/env bash
-# # скачиваем uv и запускаем команду установки зависимостей
-# curl -LsSf https://astral.sh/uv/install.sh | sh
-# source $HOME/.local/bin/env
-# make install
+# Вместо source используем точку, которая работает во всех POSIX-совместимых оболочках
+. $HOME/.local/bin/env
+
+# Установка и настройка базы данных
+make install && psql -a -d $DATABASE_URL -f database.sql
