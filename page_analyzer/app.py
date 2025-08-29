@@ -142,20 +142,6 @@ def check_url(id):
                     flash('Страница не найдена', 'danger')
                     return redirect(url_for('show_urls'))
                 
-                try:
-                    response = requests.get(url.name, timeout=5)
-                    response.raise_for_status()
-                    
-                    soup = BeautifulSoup(response.text, 'html.parser')
-                    
-                    h1 = soup.h1.get_text().strip() if soup.h1 else None
-                    title = soup.title.string.strip() if soup.title else None
-                    description = soup.find(
-                        'meta', 
-                        attrs={'name': 'description'}
-                    )
-                    description = (description['content'].strip() 
-                                if description else None)
                     
                     cursor.execute(
                         """INSERT INTO url_checks 
@@ -165,7 +151,7 @@ def check_url(id):
                     )
                     conn.commit()
                     flash('Страница успешно проверена', 'success')
-                except Exception as e:
+                
                     cursor.execute(
                         """INSERT INTO url_checks 
                         (url_id, status_code) 
