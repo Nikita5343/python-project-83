@@ -1,0 +1,36 @@
+body {
+    background-color: #f8f9fa;
+}
+
+.container-lg {
+    max-width: 1140px;
+}
+
+.table-responsive {
+    overflow-x: auto;
+}
+
+.table {
+    background-color: white;
+}
+
+.form-control:focus {
+    border-color: #495057;
+    box-shadow: 0 0 0 0.2rem rgba(73, 80, 87, 0.25);
+}
+
+.text-nowrap {
+    white-space: nowrap;
+}
+.table td {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.table td:hover {
+    overflow: visible;
+    white-space: normal;
+    word-break: break-all;
+}
