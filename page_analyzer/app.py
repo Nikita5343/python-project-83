@@ -1,174 +1,110 @@
 import os
 
 import requests
-import validators
-from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from flask import Flask, flash, redirect, render_template, request, url_for
-from psycopg2.extras import NamedTupleCursor
+from flask import (
+    Flask,
+    abort,
+    flash,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
-from .db import get_connection, normalize_url
+from page_analyzer.db import UrlRepository
+from page_analyzer.parser import get_data
+from page_analyzer.validator import normalize_url, validate_url
 
 load_dotenv()
-
-app = Flask(__name__, static_folder='static')
+app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('SECRET_KEY')
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 
-@app.route("/")
+@app.route('/')
 def index():
-    conn = get_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT * FROM urls LIMIT 10")
-            urls = cursor.fetchall()
-        return render_template('index.html', urls=urls)
-    finally:
-        conn.close()
+    return render_template(
+        'index.html',
+    )
 
 
-@app.post('/urls')
-def add_url():
-    url = request.form.get('url')
-    
-    if not url:
-        flash('URL обязателен', 'danger')
-        return render_template('index.html'), 422
-    
-    if not validators.url(url) or len(url) > 255:
+@app.route('/urls', methods=['POST'])
+def urls_index():
+    url = request.form.to_dict()
+    errors = validate_url(url['url'])
+
+    if errors:
         flash('Некорректный URL', 'danger')
-        return render_template('index.html'), 422
-    
-    normalized_url = normalize_url(url)
-    
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=NamedTupleCursor) as cursor:
-            try:
-                cursor.execute(
-                    "SELECT id FROM urls WHERE name = %s",
-                    (normalized_url,)
-                )
-                existing = cursor.fetchone()
-                
-                if existing:
-                    flash('Страница уже существует', 'info')
-                    return redirect(url_for('show_url', id=existing.id))
-                
-                cursor.execute(
-                    "INSERT INTO urls (name) VALUES (%s) RETURNING id",
-                    (normalized_url,)
-                )
-                url_id = cursor.fetchone().id
-                conn.commit()
-                flash('Страница успешно добавлена', 'success')
-                return redirect(url_for('show_url', id=url_id))
-                
-            except Exception as e:
-                conn.rollback()
-                flash('Произошла ошибка при добавлении URL', 'danger')
-                app.logger.error(f"Error adding URL: {str(e)}")
-                return render_template('index.html'), 500
+        return render_template(
+            'index.html',
+        ), 422
+
+    normalized_url = normalize_url(url['url'])
+    repo = UrlRepository(DATABASE_URL)
+    url_info = repo.find_url(normalized_url)
+    if url_info is not None:
+        flash('Страница уже существует', 'warning')
+        return redirect(url_for('get_url', id=url_info.get('id')))
+    id = repo.add_url(normalized_url)
+    flash('Страница успешно добавлена', 'success')
+    return redirect(url_for('get_url', id=id))
+
+
+@app.route('/urls/<int:id>')
+def get_url(id):
+    repo = UrlRepository(DATABASE_URL)
+    url_info = repo.find_id(id)
+
+    if not url_info:
+        abort(404)
+
+    return render_template(
+        'url.html',
+        url_info=url_info,
+    )
+
+
+@app.route('/urls/<int:id>/checks', methods=['POST'])
+def get_url_data(id):
+    repo = UrlRepository(DATABASE_URL)
+    url_info = repo.find_id(id)
+
+    try:
+        response = requests.get(url_info.get('name'), timeout=0.3)
+        response.raise_for_status()
+    except requests.RequestException:
+        flash('Произошла ошибка при проверке', 'danger')
+        return redirect(url_for('get_url', id=id))
+
+    status = response.status_code
+    data = get_data(response)
+    data['status'] = status
+    repo.add_url_check(data, url_info)
+    flash('Страница успешно проверена', 'success')
+    url_checks = repo.get_url_checks(id)
+    return render_template(
+        'url.html',
+        url_info=url_info,
+        url_checks=url_checks,
+    )
+
+
+@app.route('/urls', methods=['GET'])
+def get_urls():
+    repo = UrlRepository(DATABASE_URL)
+    all_urls_checks = repo.get_all_urls_checks()
+    return render_template(
+        'urls.html',
+        all_urls_checks=all_urls_checks,
+    )
 
 
 @app.errorhandler(404)
 def page_not_found(error):
-    try:
-        return render_template('errors/404.html'), 404
-    except Exception:
-        return "Страница не найдена", 404
+    return render_template('errors/404.html'), 404
 
 
 @app.errorhandler(500)
-def server_error(error):
-    try:
-        return render_template('errors/500.html'), 500
-    except Exception:
-        return "Внутренняя ошибка сервера", 500
-
-
-@app.route('/urls')
-def show_urls():
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=NamedTupleCursor) as cursor:
-            cursor.execute("""
-                SELECT 
-                    u.id, 
-                    u.name, 
-                    u.created_at,
-                    uc.status_code as last_status_code,
-                    uc.created_at as last_check
-                FROM urls u
-                LEFT JOIN (
-                    SELECT DISTINCT ON (url_id) *
-                    FROM url_checks
-                    ORDER BY url_id, created_at DESC
-                ) uc ON u.id = uc.url_id
-                ORDER BY u.created_at DESC
-            """)
-            urls = cursor.fetchall()
-    return render_template('urls/index.html', urls=urls)
-
-
-@app.route('/urls/<int:id>')
-def show_url(id):  
-    with get_connection() as conn:
-        with conn.cursor(cursor_factory=NamedTupleCursor) as cursor:
-            cursor.execute("SELECT * FROM urls WHERE id = %s", (id,))
-            url = cursor.fetchone()
-            
-            cursor.execute(
-                """
-                SELECT * 
-                FROM url_checks 
-                WHERE url_id = %s 
-                ORDER BY created_at DESC
-                """,
-            (id,)
-            )
-            checks = cursor.fetchall()
-    
-    return render_template('urls/show.html', url=url, checks=checks)
-
-
-@app.post('/urls/<int:id>/checks')
-def check_url(id):
-    try:
-        with get_connection() as conn:
-            with conn.cursor(cursor_factory=NamedTupleCursor) as cursor:
-                cursor.execute("SELECT name FROM urls WHERE id = %s", (id,))
-                url = cursor.fetchone()
-                
-                if not url:
-                    flash('Страница не найдена', 'danger')
-                    return redirect(url_for('show_urls'))
-                
-                    
-                    cursor.execute(
-                        """INSERT INTO url_checks 
-                        (url_id, status_code, h1, title, description) 
-                        VALUES (%s, %s, %s, %s, %s)""",
-                        (id, response.status_code, h1, title, description)
-                    )
-                    conn.commit()
-                    flash('Страница успешно проверена', 'success')
-                
-                    cursor.execute(
-                        """INSERT INTO url_checks 
-                        (url_id, status_code) 
-                        VALUES (%s, %s)""",
-                        (id, 500)
-                    )
-                    conn.commit()
-                    flash('Произошла ошибка при проверке', 'danger')
-                    app.logger.error(f"Error checking URL {url.name}: {str(e)}")
-                
-                return redirect(url_for('show_url', id=id))
-    
-    except Exception as e:
-        flash('Произошла внутренняя ошибка', 'danger')
-        app.logger.error(f"Error checking URL: {str(e)}")
-        return redirect(url_for('show_url', id=id))
-
-
-if __name__ == "__main__":
-    app.run()
+def server_error(e):
+    return render_template('errors/500.html'), 500
